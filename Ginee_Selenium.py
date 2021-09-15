@@ -1,4 +1,5 @@
 import os
+import time
 import sqlite3
 import datetime as dt
 from contextlib import closing
@@ -9,13 +10,16 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver import ActionChains
-import time
+from selenium.common.exceptions import WebDriverException, StaleElementReferenceException, ElementClickInterceptedException
+from tkinter import *
+from tkinter import ttk
 
 
 # File locations & printer name
 onedrive_location = os.path.join(os.getenv('USERPROFILE'), 'OneDrive', 'Shared Files - Shop', 'Python Scripts')
 database_location = os.path.join(onedrive_location, 'Ginee', 'ginee_orders.db')
-PRINTER = 'zk88t'
+PRINTER = 'ZDesigner GK888t'
+
 
 def setup_cursor():
     # Connects to db in autocommit mode
@@ -24,7 +28,7 @@ def setup_cursor():
     return cur
 
 
-def setup_driver(driver='Edge'):
+def setup_driver(driver='Edge', headless=False, maximized=False, zoom_level=1.0, window_position=(0, 0)):
     if driver == 'Chrome':
         driver_path = os.path.join(onedrive_location, 'chromedriver_win32', 'chromedriver.exe')
         driver = webdriver.Chrome(driver_path)
@@ -32,33 +36,52 @@ def setup_driver(driver='Edge'):
         driver_path = os.path.join(onedrive_location, 'edgedriver_win64', 'msedgedriver.exe')
         options = EdgeOptions()
         options.use_chromium = True
+        if headless:
+            options.add_argument('headless')
+            options.add_argument('disable-gpu')
         # options.binary_location = PATH
         driver = Edge(driver_path, options = options)
+    if zoom_level != 1.0:
+        driver.get('edge://settings/')
+        driver.execute_script(f'chrome.settingsPrivate.setDefaultZoom({zoom_level});')
+    if window_position != (0, 0):
+        driver.set_window_position(window_position[0], window_position[1])
+    if maximized:
+        driver.maximize_window()
+    actions = ActionChains(driver)
     return driver
 
 
-try:
-    driver = setup_driver()
+def login(driver):
+    print("LOGGING IN TO GINEE")
+    # Goes to website
+    driver.implicitly_wait(5)
     driver.get('https://seller.ginee.com/')
-    actions = ActionChains(driver)
-    # Setting language to English
-    WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.CLASS_NAME, 'ant-select-arrow'))).click()
-    languages = driver.find_elements_by_class_name("login-country-name")
 
-    for language in languages:
-        if language.text == "English":
-            language.click()
-            break
-
-    # Logging in
     with closing(setup_cursor()) as cur:
         cur.execute("SELECT user, password FROM credentials WHERE platform = 'Ginee';")
         data = cur.fetchone()
         ginee_email, ginee_password = data[0], data[1]
-    driver.find_element_by_xpath("//*[@placeholder='Please input your email']").send_keys(ginee_email)
-    driver.find_element_by_xpath("//*[@placeholder='Please enter password']").send_keys(ginee_password)
-    driver.find_element_by_tag_name("button").click()
+
+    while driver.find_elements_by_xpath('//button[normalize-space()="Login"]'):     #> BUG! Not logging in the first time
+        # Setting language to English
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, 'ant-select-arrow'))).click()
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.XPATH, '//li[normalize-space()="English"]'))).click()
+        # Logging in
+        driver.find_element_by_xpath("//*[@placeholder='Please input your email']").send_keys(ginee_email)
+        driver.find_element_by_xpath("//*[@placeholder='Please enter password']").send_keys(ginee_password)
+        driver.find_element_by_xpath('//button[normalize-space()="Login"]').click()
+        time.sleep(3)
+    print("\tSucessfully logged in.")
+
+
+def scrape(driver=None, headless=False):
+    print("SCRAPING GINEE ORDER IDs")
+    if headless:
+        driver = setup_driver(headless=True)
+        login(driver)
 
     # Goes to order
     driver.implicitly_wait(10)
@@ -69,51 +92,250 @@ try:
                 EC.presence_of_element_located((By.ID, 'myIframe')))
     driver.switch_to.frame(iframe)
     paid_tab = driver.find_element_by_xpath("//div[@aria-controls='rc-tabs-0-panel-PAID']")
-    paid_tab.click()
+    # paid_tab.click()
 
     # Inserting pending data to sqlite
     next_page_exists = True
     with closing(setup_cursor()) as cur:
         while next_page_exists:     # Waits until table is fully loaded
-            WebDriverWait(driver, 30).until(EC.presence_of_element_located((
-                                                By.XPATH, "//tbody[@class='ant-table-tbody']/tr")))
-            time.sleep(5)
-            table_rows = driver.find_elements_by_xpath("//tbody[@class='ant-table-tbody']/tr")
-            for row in table_rows:
-                ginee_order_id = row.get_attribute("data-row-key")
-                order_number = row.text.split('\n')[0]
-                store = 'Sookee' if 'Sookee Store' in row.text else 'Edge'
-                print(f"INSERTING {store}  {order_number}  ({ginee_order_id})")
-                cur.execute("""INSERT OR IGNORE INTO orders 
-                                VALUES (?, ?, ?, ?);""", (ginee_order_id, order_number, dt.datetime.now(), store))
-            next_page = driver.find_element_by_xpath("//li[@title='Next Page']")
+            try:
+                print("LOADING TABLE. . .")
+                WebDriverWait(driver, 30).until(EC.presence_of_element_located((
+                                                    By.XPATH, "//td[@class='ant-table-cell ant-table-cell-fix-right ant-table-cell-fix-right-first']")))
+                table_rows = driver.find_elements_by_xpath("//tbody[@class='ant-table-tbody']/tr")
+                print(f"LENGTH OF TABLE: {len(table_rows)}")
 
-            if next_page.get_attribute("aria-disabled") == 'false':
-                next_page.click()
-                print("CLICKING NEXT PAGE")
-            else:
-                next_page_exists = False
-                print("END OF PAGE")
+                for row in table_rows:
+                    ginee_order_id = row.get_attribute("data-row-key")
+                    order_number = row.text.split('\n')[0]
+                    store = 'Sookee' if 'Sookee Store' in row.text else 'Edge'
+                    print(f"INSERTING {store}  {order_number}  ({ginee_order_id})")
+                    cur.execute("""INSERT OR IGNORE INTO orders 
+                                    VALUES (?, ?, ?, ?);""", (ginee_order_id, order_number, dt.datetime.now(), store))
+                next_page = driver.find_element_by_xpath("//li[@title='Next Page']")
 
+                if next_page.get_attribute("aria-disabled") == 'false':
+                    next_page.click()
+                    print("CLICKING NEXT PAGE")
+                else:
+                    next_page_exists = False
+                    print("END OF PAGE")
+
+            except (StaleElementReferenceException, ElementClickInterceptedException) as e:
+                print(f"TABLE NOT FULLY LOADED: {e}")
+                time.sleep(1)
+                pass
+    if headless:
+        driver.quit()
+    return
+
+
+def go_order(driver, order_number):
+    with closing(setup_cursor()) as cur:
+        cur.execute(f"SELECT ginee_order_id FROM orders WHERE order_number = '{order_number}';")
+        ginee_order_id = cur.fetchone()[0]
     # Goes to order page
-    def get_order(order_number):
-        with closing(setup_cursor()) as cur:
-             cur.execute(f"SELECT ginee_order_id FROM orders WHERE order_number = '{order_number}';")
-             ginee_order_id = cur.fetchone()[0]
-        driver.get(f"https://seller.ginee.com/main/order/order-detail?orderId={ginee_order_id}")
+    driver.get(f"https://seller.ginee.com/main/order/order-detail?orderId={ginee_order_id}")
 
 
+def arrange_shipment(driver):
+    print("ARRANGING SHIPMENT")
+    try:
+        iframe = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.ID, 'myIframe')))
+        driver.switch_to.frame(iframe)
+    except:
+        pass
     # Arrange Shipment (ready to ship)
+    driver.implicitly_wait(10)
     driver.find_element_by_xpath("//button[normalize-space()='Arrange Shipment']").click()
-    driver.find_element_by_xpath("//button[normalize-space()='Arrange Shipment']").click()
-    driver.find_element_by_xpath("//button[normalize-space()='Print Label']").click()
+    time.sleep(2)
+    WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//button[normalize-space()='Arrange Shipment']"))).click()
 
-    # Print
-    driver.execute_script('window.print();')    # Ctrl + P
-    driver.switch_to.window(driver.window_handles[1])   # switches to print preview
+
+def print_pdf(driver):
+    print("PRINTING PDF")
+    main_window = driver.current_window_handle
+    try:
+        iframe = WebDriverWait(driver, 1).until(
+                EC.presence_of_element_located((By.ID, 'myIframe')))
+        driver.switch_to.frame(iframe)
+    except:
+        pass
+
+    # Clicking Print button from the order page
+    driver.implicitly_wait(5)
+    print_button = driver.find_elements_by_xpath("//button[normalize-space()='Print']")
+    print(print_button)
+    if print_button != []:
+        print_button[0].click()
+
+    # Generate AWB pdf in other tab
+    print_labels = driver.find_elements_by_xpath("//*[normalize-space()='Print Label']")
+    for print_label in print_labels:
+        print_label.click()
+    time.sleep(1)
+    driver.implicitly_wait(5)
+    print_button = driver.find_elements_by_xpath("//button[normalize-space()='Print']")
+    while len(print_button) < 2:
+        print_button = driver.find_elements_by_xpath("//button[normalize-space()='Print']")
+    print_button[1].click()
+
+    # Prints
+    while len(driver.window_handles) == 1:
+        time.sleep(0.25)
+    driver.switch_to.window(driver.window_handles[1])       # switches tab
+    while len(driver.window_handles) == 2:
+        time.sleep(0.25)
+        driver.execute_script('window.print();')                # Ctrl + P
+    driver.switch_to.window(driver.window_handles[2])       # switches to print preview
     driver.find_element_by_id("selecttrigger-1").click()
-    driver.find_element_by_xpath("//div[@title='OneNote for Windows 10']").click()
+    driver.find_element_by_xpath(f"//div[@title='{PRINTER}']").click()
     driver.find_element_by_xpath("//button[normalize-space()='Print']").click()
-finally:
-    time.sleep(5)
-    driver.quit()
+
+    # Closes tabs & switches to main window
+    for window in driver.window_handles:
+        if window != main_window:
+            driver.switch_to.window(window)
+            driver.close()
+    driver.switch_to.window(main_window)
+    ## Opens second tab
+    # driver.execute_script("window.open('https://seller.ginee.com/main/order', 'tab3');")
+    # driver.switch_to.window("tab3")
+
+
+def arrange_shipment_and_print(driver):
+    try:
+        #WebDriverWait(driver, 10).until(EC.presence_of_element_located((
+        #                            By.XPATH, "//button[normalize-space()='Arrange Shipment']")))
+        arrange_shipment(driver)
+        print_pdf(driver)
+    except:
+        print_pdf(driver)
+
+
+class Application():
+    time_out = 3000
+    barcode_commands = {    
+                        'READY TO SHIP': arrange_shipment,
+                        'PRINT': print_pdf,
+                        'RTS&P': arrange_shipment_and_print
+    }
+
+    def __init__(self, root):
+        # Tkinter Configuration
+        root.title('Ginee Barcode Automation')
+        root.iconbitmap(os.path.join(onedrive_location, 'Ginee', 'ginee-app-logo.ico'))
+        root.geometry("400x70")
+        self.entry = Entry(root, font=('default', 16))
+        self.entry.place(x=10, y=5, width=380, height=50)
+        reg = root.register(self.callback)
+        self.entry.config(validate="all", validatecommand=(reg, '%P'))
+        self.answer = Label(root, text='Please scan barcode', font=(None, 10), bg='white')
+        self.answer.pack(pady=30)
+        root.after(1000, self.reduce_time_out)  
+        root.bind_all("<Any-KeyPress>", self.reset_timer)
+        root.bind_all("<Any-ButtonPress>", self.reset_timer)
+        root.protocol("WM_DELETE_WINDOW", self.close_driver)    # Closes driver on closing of tkinter
+        # Initialize Selenium
+        self.open_ginee()
+        # scrape(headless=True)     # Scrape headlessly
+
+    def open_ginee(self, close_previous_driver=False):
+        if close_previous_driver:
+            self.answer.config(text='Please wait: Re-opening Ginee')
+            self.driver.quit()
+        print("OPENING GINEE")
+        self.driver = setup_driver(headless=False, maximized=True, window_position=(-1000, 0))
+        login(self.driver)
+
+
+    def callback(self, input):
+        """Verifies if barcode input is valid"""
+        input = input.strip()
+
+        if input in self.barcode_commands:
+            print(input)
+            self.answer.config(text='Command Accepted!')
+            order_page_url = self.driver.current_url
+
+            if 'order/order-detail?orderId=' not in order_page_url:
+                self.answer.config(text='Please go to order page!')
+                return True
+
+            try:
+                self.barcode_commands[input](self.driver)  # Execute command script
+            except WebDriverException:
+                self.open_ginee(close_previous_driver=True)
+                self.driver.get(order_page_url)
+                self.barcode_commands[input](self.driver)  # Execute command script
+            return True
+
+        # Goes to order page
+        elif len(input) >= 12:
+            print(input)
+            with closing(setup_cursor()) as cur:
+                cur.execute(f"SELECT ginee_order_id FROM orders WHERE order_number = '{input}'")
+                if cur.fetchone():
+                    try:
+                        go_order(self.driver, input)
+                    except WebDriverException:
+                        self.open_ginee(close_previous_driver=True)
+                        go_order(self.driver, input)
+                    return True
+                else:
+                    self.answer.config(text="ORDER NUMBER NOT FOUND", fg='red')
+                    return True
+
+        elif input == "":
+            print(input)
+            self.answer.config(text="Please scan barcode")
+            return True
+
+        else:
+            print(input)
+            self.answer.config(text='. . .', fg='red')
+            return True
+
+    def reset_timer(self, event=None):
+        # Resets timer to 2 seconds
+        if event is not None:
+            self.time_out = 2000
+        else:
+            pass
+
+    def reduce_time_out(self):
+        self.time_out = self.time_out-1000
+        print(self.time_out)
+        root.after(1000, self.reduce_time_out)
+        # Clears entry widget every 3 seconds
+        if self.time_out == 0:
+            print("TIMEOUT REACHES 0")
+            self.entry.delete(0, 'end')
+            self.reset_timer()
+        # Scrapes every hour of idle
+        elif self.time_out % -3600000 == 1:
+            print("TIMEOUT REACHES -10000")
+            self.answer.config(text='PLEASE WAIT: Scraping new pending orders', fg='red')
+            scrape(headless=True)
+
+    def close_driver(self):
+        print("Application closed")
+        print("\tClosing driver...")
+        self.driver.quit()
+        root.destroy()
+        print("\tSUCCESS!")
+
+
+if __name__ == '__main__':
+    root = Tk()
+    Application(root)
+    root.mainloop()
+    # scrape(headless=True)
+    # driver = setup_driver()
+    # login(driver)
+    # go_order(driver, 420853175910304)
+    # print_pdf(driver)
+    # driver.quit()
+    # scrape(headless=True)
