@@ -13,13 +13,14 @@ from selenium.webdriver import ActionChains
 from selenium.common.exceptions import WebDriverException, StaleElementReferenceException, ElementClickInterceptedException
 from tkinter import *
 from tkinter import ttk
+from threading import Thread, current_thread
 
 
 # File locations & printer name
 onedrive_location = os.path.join(os.getenv('USERPROFILE'), 'OneDrive', 'Shared Files - Shop', 'Python Scripts')
 database_location = os.path.join(onedrive_location, 'Ginee', 'ginee_orders.db')
 PRINTER = 'ZDesigner GK888t'
-
+PRINTER = 'Microsoft Print to PDF'
 
 def setup_cursor():
     # Connects to db in autocommit mode
@@ -55,7 +56,7 @@ def setup_driver(driver='Edge', headless=False, maximized=False, zoom_level=1.0,
 def login(driver):
     print("LOGGING IN TO GINEE")
     # Goes to website
-    driver.implicitly_wait(5)
+    # driver.implicitly_wait(5)
     driver.get('https://seller.ginee.com/')
 
     with closing(setup_cursor()) as cur:
@@ -79,7 +80,7 @@ def login(driver):
 
 def scrape(driver=None, headless=False):
     print("SCRAPING GINEE ORDER IDs")
-    if headless:
+    if headless and driver is None:
         driver = setup_driver(headless=True)
         login(driver)
 
@@ -92,7 +93,8 @@ def scrape(driver=None, headless=False):
                 EC.presence_of_element_located((By.ID, 'myIframe')))
     driver.switch_to.frame(iframe)
     paid_tab = driver.find_element_by_xpath("//div[@aria-controls='rc-tabs-0-panel-PAID']")
-    # paid_tab.click()
+    paid_tab.click()
+    time.sleep(3)
 
     # Inserting pending data to sqlite
     next_page_exists = True
@@ -125,9 +127,9 @@ def scrape(driver=None, headless=False):
                 print(f"TABLE NOT FULLY LOADED: {e}")
                 time.sleep(1)
                 pass
-    if headless:
+    if headless and driver is None:
+        print("Quitting headless driver ")
         driver.quit()
-    return
 
 
 def go_order(driver, order_number):
@@ -138,81 +140,128 @@ def go_order(driver, order_number):
     driver.get(f"https://seller.ginee.com/main/order/order-detail?orderId={ginee_order_id}")
 
 
-def arrange_shipment(driver):
-    print("ARRANGING SHIPMENT")
+def switch_to_iframe(driver):
+    """Switches to iframe to interact with elements"""
     try:
-        iframe = WebDriverWait(driver, 3).until(
+        iframe = WebDriverWait(driver, 2).until(
                 EC.presence_of_element_located((By.ID, 'myIframe')))
         driver.switch_to.frame(iframe)
+        print("\tSwitched to iframe")
     except:
         pass
-    # Arrange Shipment (ready to ship)
-    driver.implicitly_wait(10)
-    driver.find_element_by_xpath("//button[normalize-space()='Arrange Shipment']").click()
-    time.sleep(2)
-    WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//button[normalize-space()='Arrange Shipment']"))).click()
+
+
+def close_popupwindow(driver):
+    close_button = driver.find_elements_by_xpath("//button[@aria-label='Close']")
+    order_page_url = 'order/order-detail?orderId=' in driver.current_url
+
+    if close_button and order_page_url:
+        try:
+            print("\tClosing popup window...")
+            close_button[0].click()
+            time.sleep(0.25)
+        except Exception as e:
+            print("\tFailed to close window\n")
+            print(e)
+
+
+def close_tabs(driver, main_window):
+    # Closes other tabs & switches to main window
+    if len(driver.window_handles) > 1:
+        try:
+            print("\tClosing other tabs...")
+            for window in driver.window_handles:
+                if window != main_window:
+                    driver.switch_to.window(window)
+                    driver.close()
+            print("\tSwitching to main tab")
+            driver.switch_to.window(main_window)
+        except Exception as e:
+            print("\tFailed to close tabs\n")
+            print(e)
+
+
+def arrange_shipment(driver):
+    print("ARRANGING SHIPMENT")
+    switch_to_iframe(driver)
+    close_popupwindow(driver)
+    try:
+        # Arrange Shipment (ready to ship)
+        WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//button[normalize-space()='Arrange Shipment']"))).click()
+        time.sleep(2)
+        WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//button[normalize-space()='Arrange Shipment']"))).click()
+        print("\tSuccess.")
+    except Exception as e:
+        print("\tFailed.\n")
+        print(e)
 
 
 def print_pdf(driver):
     print("PRINTING PDF")
+    switch_to_iframe(driver)
     main_window = driver.current_window_handle
+    close_tabs(driver, main_window)
+    close_popupwindow(driver)
     try:
-        iframe = WebDriverWait(driver, 1).until(
-                EC.presence_of_element_located((By.ID, 'myIframe')))
-        driver.switch_to.frame(iframe)
-    except:
-        pass
-
-    # Clicking Print button from the order page
-    driver.implicitly_wait(5)
-    print_button = driver.find_elements_by_xpath("//button[normalize-space()='Print']")
-    print(print_button)
-    if print_button != []:
-        print_button[0].click()
-
-    # Generate AWB pdf in other tab
-    print_labels = driver.find_elements_by_xpath("//*[normalize-space()='Print Label']")
-    for print_label in print_labels:
-        print_label.click()
-    time.sleep(1)
-    driver.implicitly_wait(5)
-    print_button = driver.find_elements_by_xpath("//button[normalize-space()='Print']")
-    while len(print_button) < 2:
+        print("\tFinding print button")
+        # Clicking Print button from the order page
         print_button = driver.find_elements_by_xpath("//button[normalize-space()='Print']")
-    print_button[1].click()
+        if print_button:  # Only available in the order page
+            print_button[0].click()
+            time.sleep(0.25)
 
-    # Prints
-    while len(driver.window_handles) == 1:
-        time.sleep(0.25)
-    driver.switch_to.window(driver.window_handles[1])       # switches tab
-    while len(driver.window_handles) == 2:
-        time.sleep(0.25)
-        driver.execute_script('window.print();')                # Ctrl + P
-    driver.switch_to.window(driver.window_handles[2])       # switches to print preview
-    driver.find_element_by_id("selecttrigger-1").click()
-    driver.find_element_by_xpath(f"//div[@title='{PRINTER}']").click()
-    driver.find_element_by_xpath("//button[normalize-space()='Print']").click()
+        # Generate AWB pdf in other tab
+        print("\tFinding print label button")
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located(
+                                (By.XPATH, "//*[normalize-space()='Print Label']")))
+        print_labels = driver.find_elements_by_xpath("//*[normalize-space()='Print Label']")
 
-    # Closes tabs & switches to main window
-    for window in driver.window_handles:
-        if window != main_window:
-            driver.switch_to.window(window)
-            driver.close()
-    driver.switch_to.window(main_window)
-    ## Opens second tab
-    # driver.execute_script("window.open('https://seller.ginee.com/main/order', 'tab3');")
-    # driver.switch_to.window("tab3")
+        for print_label in print_labels:
+            try:
+                print('Clicking print label')
+                print_label.click()
+            except ElementClickInterceptedException as e:
+                print(e)
+                pass
+
+        time.sleep(2)
+        order_page_url = 'order/order-detail?orderId=' in driver.current_url
+
+        if order_page_url:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+                                    (By.XPATH, "//td/button[normalize-space()='Print']"))).click()
+        else:
+            switch_to_iframe(driver)
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+                                    (By.XPATH, "//button[normalize-space()='Print']"))).click()
+
+        # Switches tab then prints
+        print('\tswitching to pdf tab')
+        while len(driver.window_handles) == 1:
+            time.sleep(2)
+        driver.switch_to.window(driver.window_handles[1])           # switches tab
+        time.sleep(2)
+        driver.execute_script('window.print();')                    # Ctrl + P
+        print('\tswitching to print preview')
+        while len(driver.window_handles) == 2:
+            time.sleep(1.5)
+        driver.switch_to.window(driver.window_handles[2])           # switches to print preview
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located(
+                                        (By.ID, 'selecttrigger-1'))).click()
+        driver.find_element_by_xpath(f"//div[@title='{PRINTER}']").click()
+        driver.find_element_by_xpath("//button[normalize-space()='Print']").click()
+        print("\tPrinted.")
+        close_tabs(driver, main_window)
+    except Exception as e:
+        print("\tFailed.\n")
+        print(e)
 
 
 def arrange_shipment_and_print(driver):
-    try:
-        #WebDriverWait(driver, 10).until(EC.presence_of_element_located((
-        #                            By.XPATH, "//button[normalize-space()='Arrange Shipment']")))
-        arrange_shipment(driver)
-        print_pdf(driver)
-    except:
-        print_pdf(driver)
+    arrange_shipment(driver)
+    print_pdf(driver)
 
 
 class Application():
@@ -234,54 +283,51 @@ class Application():
         self.entry.config(validate="all", validatecommand=(reg, '%P'))
         self.answer = Label(root, text='Please scan barcode', font=(None, 10), bg='white')
         self.answer.pack(pady=30)
-        root.after(1000, self.reduce_time_out)  
+        root.after(1000, self.reduce_time_out)
         root.bind_all("<Any-KeyPress>", self.reset_timer)
         root.bind_all("<Any-ButtonPress>", self.reset_timer)
         root.protocol("WM_DELETE_WINDOW", self.close_driver)    # Closes driver on closing of tkinter
-        # Initialize Selenium
-        self.open_ginee()
-        # scrape(headless=True)     # Scrape headlessly
+        # Initialize Seleniums
+        self.driver = self.open_ginee()
+        Thread(target=scrape, args=[None, True]).start()
 
-    def open_ginee(self, close_previous_driver=False):
-        if close_previous_driver:
-            self.answer.config(text='Please wait: Re-opening Ginee')
-            self.driver.quit()
+    def open_ginee(self, headless=False):
         print("OPENING GINEE")
-        self.driver = setup_driver(headless=False, maximized=True, window_position=(-1000, 0))
-        login(self.driver)
-
+        driver = setup_driver(headless=headless, maximized=True, window_position=(-1000, 0))
+        login(driver)
+        return driver
 
     def callback(self, input):
         """Verifies if barcode input is valid"""
         input = input.strip()
+        print(input)
 
         if input in self.barcode_commands:
-            print(input)
             self.answer.config(text='Command Accepted!')
             order_page_url = self.driver.current_url
 
             if 'order/order-detail?orderId=' not in order_page_url:
-                self.answer.config(text='Please go to order page!')
+                self.answer.config(text='Please go to order page!', fg='purple')
                 return True
 
-            try:
-                self.barcode_commands[input](self.driver)  # Execute command script
-            except WebDriverException:
-                self.open_ginee(close_previous_driver=True)
-                self.driver.get(order_page_url)
-                self.barcode_commands[input](self.driver)  # Execute command script
+            # Execute command scripts
+            Thread(target=self.barcode_commands[input], args=[self.driver]).start()
+            print('DONE!')
             return True
 
         # Goes to order page
         elif len(input) >= 12:
-            print(input)
             with closing(setup_cursor()) as cur:
                 cur.execute(f"SELECT ginee_order_id FROM orders WHERE order_number = '{input}'")
-                if cur.fetchone():
+                if cur.fetchone():  # if exists
                     try:
                         go_order(self.driver, input)
                     except WebDriverException:
-                        self.open_ginee(close_previous_driver=True)
+                        self.answer.config(text=f'PLEASE WAIT: Re-opening Ginee')
+                        self.driver.quit()
+                        self.driver = self.open_ginee()
+                        root.focus_force()      # focuses on window
+                        self.entry.focus()
                         go_order(self.driver, input)
                     return True
                 else:
@@ -289,13 +335,11 @@ class Application():
                     return True
 
         elif input == "":
-            print(input)
-            self.answer.config(text="Please scan barcode")
+            self.answer.config(text="Please scan barcode", fg='black')
             return True
 
         else:
-            print(input)
-            self.answer.config(text='. . .', fg='red')
+            self.answer.config(text='. . .', fg='blue')
             return True
 
     def reset_timer(self, event=None):
@@ -309,16 +353,16 @@ class Application():
         self.time_out = self.time_out-1000
         print(self.time_out)
         root.after(1000, self.reduce_time_out)
-        # Clears entry widget every 3 seconds
+        # Clears entry widget every 2 seconds
         if self.time_out == 0:
             print("TIMEOUT REACHES 0")
             self.entry.delete(0, 'end')
             self.reset_timer()
-        # Scrapes every hour of idle
-        elif self.time_out % -3600000 == 1:
-            print("TIMEOUT REACHES -10000")
-            self.answer.config(text='PLEASE WAIT: Scraping new pending orders', fg='red')
-            scrape(headless=True)
+        # Scrapes every 30 minutes of idle
+        elif self.time_out % -1800000 == 1:
+            print("TIMEOUT REACHES -1800000")
+            self.answer.config(text='PLEASE WAIT (SCRAPING)', fg='red')
+            Thread(target=scrape, args=(None, True)).start()
 
     def close_driver(self):
         print("Application closed")
@@ -333,7 +377,7 @@ if __name__ == '__main__':
     Application(root)
     root.mainloop()
     # scrape(headless=True)
-    # driver = setup_driver()
+    # driver = setup_driver(headless=True)
     # login(driver)
     # go_order(driver, 420853175910304)
     # print_pdf(driver)
